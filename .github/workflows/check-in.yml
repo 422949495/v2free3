@@ -2,6 +2,7 @@ name: V2Free 每日签到
 
 on:
   schedule:
+    # 每天北京时间 00:30 执行，可根据需要调整
     - cron: '30 16 * * *'
   workflow_dispatch:
 
@@ -29,7 +30,8 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python check_in.py
 
-      - name: 上传错误截图（用于调试）
+      # 如果失败，上传截图用于调试
+      - name: 上传错误截图
         if: failure()
         uses: actions/upload-artifact@v4
         with:
