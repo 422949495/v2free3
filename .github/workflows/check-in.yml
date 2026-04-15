@@ -69,6 +69,7 @@ jobs:
 
       - name: 提交日志文件（可选）
         run: |
+          pip install curl_cffi
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add run.log || true
