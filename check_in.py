@@ -28,7 +28,7 @@ class CheckIn(object):
     def check_in(self):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-            "Referer": "https://w1.v2free.top/auth/login",
+            "Referer": "https://w2.v2free.top/auth/login",
         }
         data = {
             "email": self.username,
@@ -38,7 +38,7 @@ class CheckIn(object):
         self.client.post(self.login_url, data=data, headers=headers)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-            "Referer": "https://w1.v2free.top/user",
+            "Referer": "https://w2.v2free.top/user",
         }
         response = self.client.post(self.sign_url, headers=headers)
 
