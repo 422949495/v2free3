@@ -18,7 +18,7 @@ class CheckIn(object):
         self.masked_username = self.email_masking(username)
         self.login_url = "https://w2.v2free.top/auth/login"
         self.sign_url = "https://w2.v2free.top/user/checkin"
-        self.timeout = 60000  # 60秒
+        self.timeout = 90000  # 增加到 90 秒
 
     def email_masking(self, email):
         try:
@@ -33,6 +33,38 @@ class CheckIn(object):
     def _random_delay(self, min_sec=0.5, max_sec=1.5):
         time.sleep(random.uniform(min_sec, max_sec))
 
+    def _wait_for_challenge_to_pass(self, page):
+        """等待 Cloudflare 挑战自动通过"""
+        try:
+            # 检测常见的挑战页面特征
+            challenge_indicators = [
+                "Checking your browser",
+                "Just a moment",
+                "Enable JavaScript and cookies to continue",
+                "DDoS protection",
+                "验证",
+                "captcha",
+                "challenge"
+            ]
+            # 等待最多 30 秒，每 2 秒检查一次
+            for _ in range(15):
+                body_text = page.inner_text('body')
+                if any(indicator.lower() in body_text.lower() for indicator in challenge_indicators):
+                    logging.info("检测到挑战页面，等待自动通过...")
+                    page.wait_for_timeout(3000)
+                    # 尝试刷新或等待
+                    page.reload()
+                    continue
+                else:
+                    # 检查是否有表单元素出现
+                    if page.locator('input[name="email"]').count() > 0:
+                        return True
+                page.wait_for_timeout(2000)
+            return False
+        except Exception as e:
+            logging.warning(f"挑战检测异常: {e}")
+            return False
+
     def login_and_sign(self) -> Dict[str, Any]:
         result = {"success": False, "data": None, "msg": ""}
         
@@ -44,7 +76,9 @@ class CheckIn(object):
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-web-security',
-                    '--disable-features=IsolateOrigins,site-per-process'
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-gpu',
+                    '--window-size=1280,720'
                 ]
             )
             context = browser.new_context(
@@ -55,37 +89,55 @@ class CheckIn(object):
             
             try:
                 logging.info("正在访问登录页面...")
-                page.goto(self.login_url, timeout=self.timeout, wait_until='networkidle')
+                # 使用 domcontentloaded 加快加载，然后手动处理挑战
+                page.goto(self.login_url, timeout=self.timeout, wait_until='domcontentloaded')
+                
+                # 等待挑战通过或页面完全加载
+                if not self._wait_for_challenge_to_pass(page):
+                    # 挑战未通过，尝试直接等待表单出现
+                    logging.info("挑战检测未明确，等待表单元素...")
+                
+                # 再次等待邮箱输入框
+                try:
+                    page.wait_for_selector('input[name="email"]', timeout=30000)
+                except PlaywrightTimeoutError:
+                    # 保存当前页面内容用于调试
+                    html_content = page.content()
+                    with open('debug.html', 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                    page.screenshot(path='debug.png')
+                    raise Exception("未找到登录表单，可能被 Cloudflare 永久拦截")
+                
+                logging.info("登录表单已加载，开始填写...")
                 self._random_delay(1, 2)
                 
-                # 填写表单
-                page.wait_for_selector('input[name="email"]', timeout=self.timeout)
                 page.fill('input[name="email"]', self.username)
                 page.fill('input[name="passwd"]', self.password)
                 self._random_delay(0.5, 1)
                 
-                # 点击登录按钮 - 同步方式，不需要 await
+                # 点击登录按钮
                 login_btn = page.locator('button[type="submit"], input[type="submit"], .btn-login, #login-btn')
                 if login_btn.count() == 0:
                     login_btn = page.locator('text=登录')
+                if login_btn.count() == 0:
+                    # 尝试通过 text 匹配
+                    login_btn = page.locator('button:has-text("登录"), input:has-text("登录")')
+                if login_btn.count() == 0:
+                    raise Exception("未找到登录按钮")
                 login_btn.click()
                 
-                # 等待页面跳转
+                # 等待跳转
                 page.wait_for_url(lambda url: '/user' in url or '/dashboard' in url, timeout=self.timeout)
                 logging.info("登录成功，页面已跳转")
                 
-                # 处理可能的验证页面
-                if page.locator('text=验证').count() > 0 or page.locator('text=captcha').count() > 0:
-                    logging.warning("检测到验证页面，等待自动通过...")
-                    page.wait_for_function(
-                        "() => !document.body.innerText.includes('验证') && !document.body.innerText.includes('captcha')",
-                        timeout=30000
-                    )
+                # 再次处理可能出现的挑战（登录后可能还有）
+                self._wait_for_challenge_to_pass(page)
                 
                 # 访问签到页面
                 self._random_delay(1, 2)
                 logging.info("正在访问签到页面...")
-                page.goto(self.sign_url, timeout=self.timeout, wait_until='networkidle')
+                page.goto(self.sign_url, timeout=self.timeout, wait_until='domcontentloaded')
+                self._wait_for_challenge_to_pass(page)
                 
                 # 监听签到 API 响应
                 sign_result = None
@@ -100,15 +152,18 @@ class CheckIn(object):
                 
                 page.on('response', handle_response)
                 
-                # 点击签到按钮（如果存在）
+                # 尝试点击签到按钮
                 sign_btn = page.locator('button:has-text("签到"), .btn-checkin, input[value="签到"]')
                 if sign_btn.count() > 0:
                     sign_btn.click()
                     self._random_delay(2, 3)
+                else:
+                    # 如果没有显式按钮，页面可能自动签到，直接等待响应
+                    logging.info("未找到签到按钮，等待自动签到响应...")
                 
-                # 等待 API 响应（最多10秒）
+                # 等待 API 响应（最多 15 秒）
                 start = time.time()
-                while sign_result is None and (time.time() - start) < 10:
+                while sign_result is None and (time.time() - start) < 15:
                     page.wait_for_timeout(500)
                 
                 if sign_result:
@@ -127,24 +182,29 @@ class CheckIn(object):
                         result['success'] = True
                         result['msg'] = '今日已签到'
                     else:
+                        # 保存失败时的页面内容
+                        with open('sign_failed.html', 'w', encoding='utf-8') as f:
+                            f.write(page.content())
                         result['msg'] = '未检测到签到结果，可能签到失败'
                 
             except PlaywrightTimeoutError as e:
                 logging.error(f"操作超时: {e}")
                 result['msg'] = f'页面加载超时: {str(e)}'
+                # 保存现场
+                try:
+                    page.screenshot(path='error_timeout.png')
+                    with open('error_timeout.html', 'w', encoding='utf-8') as f:
+                        f.write(page.content())
+                except:
+                    pass
             except Exception as e:
                 logging.error(f"发生异常: {e}")
                 result['msg'] = str(e)
+                try:
+                    page.screenshot(path='error_exception.png')
+                except:
+                    pass
             finally:
-                # 失败时保存截图
-                if not result['success']:
-                    try:
-                        screenshot = page.screenshot()
-                        with open('debug.png', 'wb') as f:
-                            f.write(screenshot)
-                        logging.info("已保存调试截图 debug.png")
-                    except Exception as e:
-                        logging.warning(f"保存截图失败: {e}")
                 browser.close()
         
         return result
