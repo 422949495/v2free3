@@ -5,7 +5,6 @@ import sys
 import json
 import logging
 import argparse
-import time
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from requests.utils import quote
@@ -58,42 +57,66 @@ class V2FreeCheckIn:
             page = context.new_page()
 
             try:
-                # 1. 访问登录页面，并等待网络空闲
+                # 1. 访问登录页
                 logging.info(f"正在访问登录页: {self.LOGIN_URL}")
                 page.goto(self.LOGIN_URL, wait_until="networkidle", timeout=60000)
-                
-                # 2. 等待登录表单加载完成
+
+                # 2. 尝试选择简体中文（如果存在语言切换器）
+                try:
+                    # 等待页面可能存在的语言下拉或按钮
+                    lang_switcher = page.locator("text=Select Language").first
+                    if lang_switcher.count() > 0:
+                        lang_switcher.click()
+                        # 点击后等待中文选项出现并点击
+                        page.locator("text=简体中文").first.click(timeout=3000)
+                        logging.info("已切换语言为简体中文")
+                        page.wait_for_timeout(1000)  # 等待页面刷新
+                except Exception:
+                    pass  # 忽略语言切换失败，继续登录
+
+                # 3. 等待表单元素
                 page.wait_for_selector("input[name='Email']", timeout=10000)
                 page.wait_for_selector("input[name='Password']", timeout=10000)
-                
-                # 3. 输入账号和密码
+
                 logging.info(f"正在登录 {self.masked_username} ...")
                 page.fill("input[name='Email']", self.username)
                 page.fill("input[name='Password']", self.password)
-                
-                # 4. 点击登录按钮
-                page.click("button:has-text('登录')")
-                logging.info("已点击登录按钮，等待页面跳转...")
-                
-                # 5. 等待登录成功后的跳转
-                try:
-                    # 等待跳转到用户中心页面，增加超时时间到30秒
-                    page.wait_for_url(f"{self.USER_URL}*", timeout=30000)
-                    logging.info("登录成功，已跳转至用户中心！")
-                except PlaywrightTimeoutError:
-                    # 如果超时，检查当前URL是否是用户中心，可能已经跳转了但URL匹配失败
-                    current_url = page.url
-                    if self.USER_URL in current_url:
-                        logging.info(f"当前已在用户中心: {current_url}")
-                    else:
-                        # 如果不在用户中心，可能是登录失败，保存截图并退出
-                        page.screenshot(path="login_failed.png")
-                        raise Exception(f"登录后未能跳转到用户中心，当前URL: {current_url}")
 
-                # 6. 确保在用户中心页面
+                # 4. 点击登录并等待导航（表单提交后的跳转）
+                # 使用 expect_navigation 来精确捕获 POST 后的页面跳转
+                with page.expect_navigation(wait_until="networkidle", timeout=30000):
+                    page.click("button:has-text('登录')")
+                logging.info("登录请求已提交，页面发生跳转")
+
+                # 5. 检查当前 URL 是否为用户中心
+                current_url = page.url
+                if self.USER_URL not in current_url:
+                    # 未跳转到用户中心，可能登录失败，检查错误信息
+                    error_selectors = [
+                        ".alert-danger", ".text-danger", ".error", ".invalid-feedback"
+                    ]
+                    error_msg = ""
+                    for sel in error_selectors:
+                        el = page.locator(sel)
+                        if el.count() > 0:
+                            error_msg = el.first.inner_text()
+                            break
+                    if not error_msg:
+                        # 尝试获取整个页面文本片段
+                        body_text = page.locator("body").inner_text()
+                        if "账号或密码错误" in body_text:
+                            error_msg = "账号或密码错误"
+                        elif "验证码" in body_text:
+                            error_msg = "需要输入验证码"
+                        else:
+                            error_msg = "登录失败，未跳转至用户中心"
+                    raise Exception(f"登录失败: {error_msg}")
+
+                logging.info("登录成功，已进入用户中心！")
+
+                # 6. 确保在用户中心页面并签到
                 page.goto(self.USER_URL, wait_until="networkidle")
-                
-                # 7. 签到
+
                 sign_selectors = [
                     "button:has-text('签到')",
                     "a:has-text('签到')",
@@ -140,7 +163,6 @@ class V2FreeCheckIn:
                 error_msg = f"操作超时: {e}"
                 logging.error(error_msg)
                 page.screenshot(path="timeout_error.png")
-                logging.info("已保存截图 timeout_error.png")
                 self._send_notification(title=f"{self.masked_username} 签到失败", content=error_msg)
                 sys.exit(1)
             except Exception as e:
