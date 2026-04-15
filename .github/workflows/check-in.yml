@@ -2,7 +2,7 @@ name: V2Free 每日签到
 
 on:
   schedule:
-    - cron: '30 16 * * *'   # 北京时间 00:30
+    - cron: '30 16 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,3 +28,10 @@ jobs:
           V2FREE_PASSWORD: ${{ secrets.V2FREE_PASSWORD }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python check_in.py
+
+      - name: 上传错误截图（用于调试）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshots
+          path: "*.png"
