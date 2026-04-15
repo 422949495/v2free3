@@ -61,62 +61,98 @@ class V2FreeCheckIn:
                 logging.info(f"正在访问登录页: {self.LOGIN_URL}")
                 page.goto(self.LOGIN_URL, wait_until="networkidle", timeout=60000)
 
-                # 2. 尝试选择简体中文（如果存在语言切换器）
+                # 2. 切换语言为简体中文
+                # 寻找包含 "Select Language" 文本的元素并点击
                 try:
-                    # 等待页面可能存在的语言下拉或按钮
-                    lang_switcher = page.locator("text=Select Language").first
-                    if lang_switcher.count() > 0:
-                        lang_switcher.click()
-                        # 点击后等待中文选项出现并点击
-                        page.locator("text=简体中文").first.click(timeout=3000)
-                        logging.info("已切换语言为简体中文")
-                        page.wait_for_timeout(1000)  # 等待页面刷新
-                except Exception:
-                    pass  # 忽略语言切换失败，继续登录
+                    logging.info("尝试切换语言为简体中文...")
+                    # 等待语言选择器出现
+                    lang_selector = page.locator("text=Select Language").first
+                    lang_selector.wait_for(state="visible", timeout=5000)
+                    lang_selector.click()
+                    # 等待下拉菜单出现并点击简体中文
+                    chinese_option = page.locator("text=简体中文").first
+                    chinese_option.wait_for(state="visible", timeout=5000)
+                    chinese_option.click()
+                    # 等待页面刷新（语言切换后页面可能重新加载）
+                    page.wait_for_load_state("networkidle")
+                    logging.info("已成功切换语言为简体中文")
+                except PlaywrightTimeoutError:
+                    logging.warning("未找到语言切换器或已经为中文，继续执行")
+                except Exception as e:
+                    logging.warning(f"语言切换失败，但可尝试继续: {e}")
 
-                # 3. 等待表单元素
-                page.wait_for_selector("input[name='Email']", timeout=10000)
-                page.wait_for_selector("input[name='Password']", timeout=10000)
+                # 3. 等待表单元素（中文界面下字段名可能不同）
+                # 多尝试几个可能的选择器
+                email_selectors = [
+                    "input[name='Email']",
+                    "input[name='email']",
+                    "input[type='email']",
+                    "#email"
+                ]
+                pass_selectors = [
+                    "input[name='Password']",
+                    "input[name='passwd']",
+                    "input[type='password']",
+                    "#password"
+                ]
+                email_input = None
+                for sel in email_selectors:
+                    if page.locator(sel).count() > 0:
+                        email_input = sel
+                        break
+                if not email_input:
+                    raise Exception("找不到邮箱输入框")
+
+                pass_input = None
+                for sel in pass_selectors:
+                    if page.locator(sel).count() > 0:
+                        pass_input = sel
+                        break
+                if not pass_input:
+                    raise Exception("找不到密码输入框")
 
                 logging.info(f"正在登录 {self.masked_username} ...")
-                page.fill("input[name='Email']", self.username)
-                page.fill("input[name='Password']", self.password)
+                page.fill(email_input, self.username)
+                page.fill(pass_input, self.password)
 
-                # 4. 点击登录并等待导航（表单提交后的跳转）
-                # 使用 expect_navigation 来精确捕获 POST 后的页面跳转
+                # 4. 点击登录并等待导航
+                # 查找登录按钮（中文界面下可能是“登录”）
+                submit_btn = page.locator("button:has-text('登录')").first
+                if submit_btn.count() == 0:
+                    submit_btn = page.locator("button:has-text('Login')").first
+                if submit_btn.count() == 0:
+                    submit_btn = page.locator("button[type='submit']").first
+
+                if submit_btn.count() == 0:
+                    raise Exception("找不到登录按钮")
+
+                # 使用 expect_navigation 精确等待跳转
                 with page.expect_navigation(wait_until="networkidle", timeout=30000):
-                    page.click("button:has-text('登录')")
+                    submit_btn.click()
                 logging.info("登录请求已提交，页面发生跳转")
 
-                # 5. 检查当前 URL 是否为用户中心
+                # 5. 检查是否登录成功
                 current_url = page.url
                 if self.USER_URL not in current_url:
-                    # 未跳转到用户中心，可能登录失败，检查错误信息
-                    error_selectors = [
-                        ".alert-danger", ".text-danger", ".error", ".invalid-feedback"
-                    ]
-                    error_msg = ""
-                    for sel in error_selectors:
-                        el = page.locator(sel)
-                        if el.count() > 0:
-                            error_msg = el.first.inner_text()
-                            break
-                    if not error_msg:
-                        # 尝试获取整个页面文本片段
-                        body_text = page.locator("body").inner_text()
-                        if "账号或密码错误" in body_text:
-                            error_msg = "账号或密码错误"
-                        elif "验证码" in body_text:
-                            error_msg = "需要输入验证码"
+                    # 检查错误信息
+                    error_text = ""
+                    error_elements = page.locator(".alert-danger, .text-danger, .error, .invalid-feedback")
+                    if error_elements.count() > 0:
+                        error_text = error_elements.first.inner_text()
+                    else:
+                        body = page.locator("body").inner_text()
+                        if "账号或密码错误" in body:
+                            error_text = "账号或密码错误"
+                        elif "验证码" in body:
+                            error_text = "需要输入验证码"
                         else:
-                            error_msg = "登录失败，未跳转至用户中心"
-                    raise Exception(f"登录失败: {error_msg}")
+                            error_text = "未知错误，未跳转至用户中心"
+                    raise Exception(f"登录失败: {error_text}")
 
                 logging.info("登录成功，已进入用户中心！")
 
-                # 6. 确保在用户中心页面并签到
+                # 6. 签到
                 page.goto(self.USER_URL, wait_until="networkidle")
-
                 sign_selectors = [
                     "button:has-text('签到')",
                     "a:has-text('签到')",
