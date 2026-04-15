@@ -1,81 +1,76 @@
-# This is a basic workflow to help you get started with Actions
-
 name: V2FreeCheckIn
 
-# Controls when the workflow will run
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
   schedule:
-    - cron: '5 13 * * *' # UTC+8: 北京时间上午11点05分
+    - cron: '5 13 * * *'   # 北京时间 21:05 (UTC+8)
 
 permissions:
-  actions: write
-  checks: write
-  contents: write
-  deployments: write
-  issues: write
-  packages: write
-  pull-requests: write
-  repository-projects: write
-  security-events: write
-  statuses: write
+  contents: write   # 仅需写内容权限用于自动提交
 
 jobs:
   check-in:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+      - name: 检出代码
+        uses: actions/checkout@v3
 
-    - name: 设置 Python 环境
-      uses: actions/setup-python@v4.7.0
-      
-    - name: 安装依赖
-      run: |
-        pip3 install -r requirements.txt
-        
-    - name: 签到主进程
-      run: |
-        user='${{ secrets.USER }}'
-        pwd='${{ secrets.PWD }}'
-        
-        user_list=()
-        pwd_list=()
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-        IFS="," # 分隔符
+      - name: 安装依赖
+        run: |
+          pip install requests
 
-        for u in ${user[*]}
-        do
-          user_list[${#user_list[*]}]=${u}
-        done
+      - name: 签到主进程
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          # 从 Secrets 读取账号密码（逗号分隔）
+          user='${{ secrets.USER }}'
+          pwd='${{ secrets.PWD }}'
 
-        for p in ${pwd[*]}
-        do
-          pwd_list[${#pwd_list[*]}]=${p}
-        done
+          # 转换为数组（处理逗号分隔，移除可能的多余空格）
+          IFS=',' read -ra user_arr <<< "$user"
+          IFS=',' read -ra pwd_arr <<< "$pwd"
 
-        user_num=${#user_list[*]}
-        pwd_num=${#pwd_list[*]}
+          user_num=${#user_arr[@]}
+          pwd_num=${#pwd_arr[@]}
 
-        if [ $user_num != $pwd_num ];then
-          echo "账号和密码个数不对应"
-          exit 1
-        else
-          echo "共有 $user_num 个账号，即将开始签到！"
-        fi
+          if [ $user_num -ne $pwd_num ]; then
+            echo "错误：账号和密码数量不匹配！账号数：$user_num，密码数：$pwd_num"
+            exit 1
+          fi
 
-        for ((i=0;i<$user_num;i++))
-        do
-          python3 check_in.py --username ${user_list[$i]} --password ${pwd_list[$i]}
-        done
-    - name: Git 提交 Commit
-      run: |
-        git config --global user.email 994302767@qq.com
-        git config --global user.name action
-        git add .
-        git commit -m ":star: 签到成功" -a
-    - name: Git 提交到主仓库
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+          echo "共有 $user_num 个账号，开始签到..."
+
+          success_count=0
+          for ((i=0; i<user_num; i++)); do
+            # 去除首尾空格
+            u=$(echo "${user_arr[$i]}" | xargs)
+            p=$(echo "${pwd_arr[$i]}" | xargs)
+
+            echo "正在签到第 $((i+1)) 个账号: ${u%%@*}..."
+            if python check_in.py --username "$u" --password "$p"; then
+              ((success_count++))
+            fi
+          done
+
+          echo "签到完成，成功 $success_count / $user_num 个账号"
+
+          # 如果全部失败则退出码非零，阻止后续提交（可选）
+          if [ $success_count -eq 0 ]; then
+            echo "所有账号签到均失败，请检查日志"
+            exit 1
+          fi
+
+      - name: 提交日志文件（可选）
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add run.log || true
+          git commit -m "📝 更新签到日志" || echo "没有需要提交的更改"
+          git push || echo "推送失败或无变更"
