@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: 安装依赖
-        run: pip install requests
+        run: pip install requests cloudscraper
       - name: 签到主进程
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
