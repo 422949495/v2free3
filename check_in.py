@@ -5,15 +5,16 @@ import logging
 import argparse
 import sys
 import os
-import requests
-
+from curl_cffi import requests
 
 class CheckIn(object):
     def __init__(self, username, password):
         self.username = username
         self.password = password
         self.masked_username = self.email_masking(username)
-        self.client = requests.Session()
+        self.session = requests.Session()
+        # 模拟 Chrome 120 的 TLS 指纹
+        self.session.impersonate = "chrome120"
         self.login_url = "https://w2.v2free.top/auth/login"
         self.sign_url = "https://w2.v2free.top/user/checkin"
         self.user_url = "https://w2.v2free.top/user"
@@ -42,11 +43,10 @@ class CheckIn(object):
             "Origin": "https://w2.v2free.top"
         })
         try:
-            resp = self.client.post(self.login_url, data=data, headers=headers, timeout=15)
+            resp = self.session.post(self.login_url, data=data, headers=headers, timeout=15)
             if resp.status_code != 200:
                 logging.error(f"登录失败 HTTP {resp.status_code}")
                 return False
-            # 尝试 JSON 解析
             try:
                 j = resp.json()
                 if j.get("ret") == 1 or "成功" in j.get("msg", ""):
@@ -56,8 +56,8 @@ class CheckIn(object):
                     logging.error(f"登录失败: {j}")
                     return False
             except:
-                # 非 JSON，检查 Cookie 中是否有 uid
-                if self.client.cookies.get("uid"):
+                # 非 JSON 判断 Cookie
+                if self.session.cookies.get("uid"):
                     logging.info(f"{self.masked_username} 登录成功（cookie 判断）")
                     return True
                 else:
@@ -71,7 +71,7 @@ class CheckIn(object):
         headers = self.headers.copy()
         headers["Referer"] = "https://w2.v2free.top/auth/login"
         try:
-            self.client.get(self.user_url, headers=headers, timeout=10)
+            self.session.get(self.user_url, headers=headers, timeout=10)
         except Exception as e:
             logging.warning(f"访问用户主页失败: {e}")
 
@@ -82,19 +82,23 @@ class CheckIn(object):
             "Origin": "https://w2.v2free.top"
         })
         try:
-            resp = self.client.post(self.sign_url, headers=headers, timeout=15)
+            resp = self.session.post(self.sign_url, headers=headers, timeout=15)
             if resp.status_code != 200:
                 return {"success": False, "msg": f"HTTP {resp.status_code}"}
+
+            # 尝试解析 JSON，失败则返回原始文本前 200 字符（但通常是乱码）
             try:
                 result = resp.json()
-                # 关键：检查业务返回码，通常 ret=1 表示成功
                 if result.get("ret") == 1:
                     return {"success": True, "data": result}
                 else:
-                    # ret=0 或其他都算失败
                     return {"success": False, "msg": result.get("msg", "未知错误")}
             except json.JSONDecodeError:
-                return {"success": False, "msg": resp.text[:200]}
+                # 可能是被拦截的 HTML 页面，尝试提取标题或返回提示
+                if "验证" in resp.text or "captcha" in resp.text.lower():
+                    return {"success": False, "msg": "触发人机验证，签到失败"}
+                return {"success": False, "msg": f"非 JSON 响应: {resp.text[:200]}"}
+
         except Exception as e:
             return {"success": False, "msg": str(e)}
 
@@ -103,7 +107,9 @@ class CheckIn(object):
         if not token:
             return
         try:
-            requests.get("https://www.pushplus.plus/send", params={
+            # 使用普通 requests 发推送即可
+            import requests as req
+            req.get("https://www.pushplus.plus/send", params={
                 "token": token,
                 "title": title,
                 "content": content
