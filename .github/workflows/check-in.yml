@@ -64,3 +64,9 @@ jobs:
           git add debug.png || true
           git commit -m "📸 添加调试截图" || echo "无截图"
           git push || echo "推送失败"
+          uses: actions/upload-artifact@v3
+          with:
+            name: debug-files
+            path: |
+              *.png
+              *.html
