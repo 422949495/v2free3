@@ -16,8 +16,17 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: 安装依赖
-        run: pip install requests cloudscraper
+      
+      - name: 安装 Playwright 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libnspr4 libatk-bridge2.0-0 libdrm-dev libxkbcommon-dev libgbm-dev libasound-dev
+      
+      - name: 安装 Python 依赖
+        run: |
+          pip install playwright requests
+          playwright install chromium
+      
       - name: 签到主进程
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
@@ -46,10 +55,12 @@ jobs:
           if [ $success_count -eq 0 ]; then
             exit 1
           fi
-      - name: 提交日志
+      
+      - name: 提交调试截图（可选）
+        if: failure()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "actions@github.com"
-          git add run.log || true
-          git commit -m "📝 更新签到日志" || echo "无变更"
+          git add debug.png || true
+          git commit -m "📸 添加调试截图" || echo "无截图"
           git push || echo "推送失败"
