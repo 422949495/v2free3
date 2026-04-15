@@ -1,164 +1,268 @@
 # coding=UTF-8
 
-import os
-import sys
 import json
 import logging
 import argparse
+import sys
+import os
+import time
+import gzip
+import random
 import requests
-from requests.utils import quote
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from io import BytesIO
+from typing import Optional, Tuple, Dict, Any
 
-LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
-class V2FreeAutoSign:
-    LOGIN_URL = "https://w2.v2free.top/auth/login"
-    USER_URL = "https://w2.v2free.top/user"
-
-    def __init__(self, username: str, password: str):
+class CheckIn(object):
+    def __init__(self, username, password):
         self.username = username
         self.password = password
-        self.masked_username = self._mask_email(username)
+        self.masked_username = self.email_masking(username)
+        self.client = requests.Session()
+        self.login_url = "https://w2.v2free.top/auth/login"
+        self.sign_url = "https://w2.v2free.top/user/checkin"
+        self.user_url = "https://w2.v2free.top/user"
+        # 基础头部，后续可动态覆盖
+        self.base_headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate",  # 避免 br 编码问题
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "DNT": "1",
+        }
+        # 随机 UA 列表
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ]
 
-    @staticmethod
-    def _mask_email(email: str) -> str:
-        at = email.rfind('@')
-        if at == -1:
-            return email
-        return email[0] + '******' + email[at:at+2] + '***'
-
-    def _send_notification(self, title: str, content: str):
-        token = os.environ.get("PUSHPLUS_TOKEN", "")
-        if not token:
-            logging.warning("未设置 PUSHPLUS_TOKEN，跳过通知")
-            return
-        url = f"https://www.pushplus.plus/send?token={token}&title={quote(title)}&content={quote(content)}"
+    def email_masking(self, email):
         try:
-            requests.get(url, timeout=10)
-            logging.info("通知已发送")
-        except Exception as e:
-            logging.error(f"通知发送失败: {e}")
+            at = email.rfind('@')
+            dot = email.rfind('.')
+            if at == -1 or dot == -1:
+                return email
+            return email[0].ljust(at, '*') + email[at:at+2] + email[dot:].rjust(len(email)-at-2, '*')
+        except:
+            return email
 
-    def run(self):
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled']
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai"
-            )
-            page = context.new_page()
+    def get_random_user_agent(self) -> str:
+        """随机选择一个 User-Agent"""
+        return random.choice(self.user_agents)
 
+    def _build_headers(self, extra_headers: Optional[Dict] = None) -> Dict:
+        """构建完整的请求头，包含随机 UA 和可选额外头部"""
+        headers = self.base_headers.copy()
+        headers["User-Agent"] = self.get_random_user_agent()
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
+    def _decode_response(self, response: requests.Response) -> str:
+        """手动解压 gzip/deflate 响应（requests 通常自动处理，但此处保留原有逻辑）"""
+        try:
+            if response.headers.get('Content-Encoding') == 'gzip':
+                return gzip.GzipFile(fileobj=BytesIO(response.content)).read().decode('utf-8')
+            elif response.headers.get('Content-Encoding') == 'deflate':
+                return response.content.decode('utf-8', errors='ignore')
+            else:
+                return response.text
+        except:
+            return response.text
+
+    def _is_cloudflare_challenge(self, text: str, status_code: int) -> bool:
+        """检测是否为 Cloudflare 验证页面"""
+        if status_code in (403, 503):
+            return True
+        if not text:
+            return False
+        lower_text = text.lower()
+        return ('cloudflare' in lower_text or
+                'challenge-form' in lower_text or
+                'captcha' in lower_text or
+                '验证' in text or
+                '非机器人' in text)
+
+    def _delay(self, seconds: float):
+        """延时，模拟人类行为"""
+        time.sleep(seconds)
+
+    def request_with_retry(self, method: str, url: str,
+                           max_retries: int = 3,
+                           retry_delay: float = 2.0,
+                           headers: Optional[Dict] = None,
+                           data: Optional[Dict] = None,
+                           timeout: int = 15) -> Tuple[Optional[requests.Response], Optional[str]]:
+        """
+        带重试的请求函数，自动处理 Cloudflare 验证。
+        返回 (response, error_msg)，若成功 response 不为 None，否则 error_msg 不为 None。
+        """
+        for attempt in range(1, max_retries + 1):
             try:
-                # ---------- 1. 登录 ----------
-                logging.info(f"正在访问登录页: {self.LOGIN_URL}")
-                page.goto(self.LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-
-                # 等待输入框
-                page.wait_for_selector("input[name='Email']", timeout=10000)
-                page.wait_for_selector("input[name='Password']", timeout=10000)
-
-                logging.info(f"正在登录 {self.masked_username} ...")
-                page.fill("input[name='Email']", self.username)
-                page.fill("input[name='Password']", self.password)
-
-                # 点击登录并等待跳转到用户中心
-                page.click("button:has-text('登录')")
-                page.wait_for_url(f"{self.USER_URL}*", timeout=30000)
-                logging.info("✅ 登录成功，已进入用户中心")
-
-                # ---------- 2. 签到 ----------
-                page.goto(self.USER_URL, wait_until="networkidle")
-                logging.info("正在查找签到按钮...")
-
-                sign_selectors = [
-                    "button:has-text('签到')",
-                    "a:has-text('签到')",
-                    "button:has-text('每日签到')",
-                    "#checkin-btn",
-                    ".checkin-btn",
-                ]
-                clicked = False
-                for sel in sign_selectors:
-                    loc = page.locator(sel)
-                    if loc.count() > 0:
-                        loc.first.click()
-                        clicked = True
-                        logging.info(f"已点击签到按钮: {sel}")
-                        break
-
-                if not clicked:
-                    # 可能今日已签到
-                    page.screenshot(path="no_sign_button.png")
-                    result_text = "未找到签到按钮，可能今日已签到"
+                # 每次重试使用不同的 User-Agent
+                req_headers = self._build_headers(headers)
+                if method.upper() == 'GET':
+                    resp = self.client.get(url, headers=req_headers, timeout=timeout)
+                elif method.upper() == 'POST':
+                    resp = self.client.post(url, headers=req_headers, data=data, timeout=timeout)
                 else:
-                    # 等待签到结果（Turnstile 验证会自动处理，通常 3~5 秒）
-                    page.wait_for_timeout(5000)
-                    
-                    # 捕获结果文字
-                    result_locators = [
-                        ".alert", ".toast", ".message", "#checkin-result", ".swal2-content"
-                    ]
-                    result_text = ""
-                    for loc_sel in result_locators:
-                        el = page.locator(loc_sel)
-                        if el.count() > 0:
-                            result_text = el.first.inner_text()
-                            break
-                    if not result_text:
-                        body_text = page.locator("body").inner_text()
-                        if "签到成功" in body_text:
-                            result_text = "签到成功"
-                        elif "已经签到" in body_text:
-                            result_text = "今日已签到"
-                        else:
-                            result_text = "操作已完成，请手动确认"
+                    return None, f"不支持的请求方法: {method}"
 
-                logging.info(f"签到结果: {result_text}")
-                self._send_notification(
-                    title=f"{self.masked_username} 签到结果",
-                    content=result_text
-                )
+                # 检查响应内容是否为 Cloudflare 验证页面
+                body = self._decode_response(resp)
+                if self._is_cloudflare_challenge(body, resp.status_code):
+                    logging.warning(f"检测到 Cloudflare 防护 (尝试 {attempt}/{max_retries})")
+                    if attempt < max_retries:
+                        self._delay(retry_delay * attempt)  # 递增延时
+                        continue
+                    else:
+                        return None, "Cloudflare 验证失败，已达最大重试次数"
+                return resp, None
 
-                # 如果明确失败则退出码为 1
-                if "失败" in result_text or "无法接受" in result_text:
-                    sys.exit(1)
+            except requests.RequestException as e:
+                logging.warning(f"请求异常 (尝试 {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    self._delay(retry_delay * attempt)
+                    continue
+                return None, f"请求异常: {e}"
+        return None, "未知错误"
 
-            except PlaywrightTimeoutError as e:
-                error_msg = f"操作超时: {e}"
-                logging.error(error_msg)
-                page.screenshot(path="timeout_error.png")
-                self._send_notification(title=f"{self.masked_username} 签到超时", content=error_msg)
-                sys.exit(1)
-            except Exception as e:
-                error_msg = f"签到异常: {e}"
-                logging.exception(error_msg)
-                page.screenshot(path="exception_error.png")
-                self._send_notification(title=f"{self.masked_username} 签到异常", content=error_msg)
-                sys.exit(1)
-            finally:
-                browser.close()
+    def login(self) -> bool:
+        """登录，使用重试机制"""
+        data = {"email": self.username, "passwd": self.password, "code": ""}
+        extra_headers = {
+            "Referer": "https://w2.v2free.top/auth/login",
+            "Origin": "https://w2.v2free.top",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        # 登录前随机延时
+        self._delay(random.uniform(1, 2))
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--username", type=str, help="登录邮箱")
-    parser.add_argument("--password", type=str, help="登录密码")
-    args = parser.parse_args()
+        resp, err = self.request_with_retry('POST', self.login_url,
+                                             headers=extra_headers,
+                                             data=data,
+                                             max_retries=3,
+                                             retry_delay=2.0)
+        if err or resp is None:
+            logging.error(f"登录请求失败: {err}")
+            return False
 
-    username = os.environ.get("V2FREE_USERNAME") or args.username
-    password = os.environ.get("V2FREE_PASSWORD") or args.password
+        if resp.status_code != 200:
+            logging.error(f"登录失败 HTTP {resp.status_code}")
+            return False
 
-    if not username or not password:
-        logging.error("请通过环境变量或参数提供账号密码")
-        sys.exit(1)
+        text = self._decode_response(resp)
+        logging.debug(f"登录响应前200字符: {text[:200]}")
 
-    signer = V2FreeAutoSign(username, password)
-    signer.run()
+        try:
+            j = json.loads(text)
+            if j.get("ret") == 1 or "成功" in j.get("msg", ""):
+                logging.info(f"{self.masked_username} 登录成功")
+                return True
+            else:
+                logging.error(f"登录失败: {j}")
+                return False
+        except json.JSONDecodeError:
+            # 有些情况返回 HTML，检查 cookie 是否设置
+            if self.client.cookies.get("uid"):
+                logging.info(f"{self.masked_username} 登录成功（cookie 判断）")
+                return True
+            else:
+                logging.error("登录失败，未获取到有效 cookie")
+                return False
+
+    def visit_user_page(self):
+        """访问用户主页，模拟正常浏览"""
+        extra_headers = {"Referer": "https://w2.v2free.top/auth/login"}
+        self._delay(random.uniform(0.5, 1.5))
+        resp, err = self.request_with_retry('GET', self.user_url,
+                                             headers=extra_headers,
+                                             max_retries=2,
+                                             retry_delay=1.5)
+        if err:
+            logging.warning(f"访问用户主页失败: {err}")
+
+    def sign(self) -> Dict[str, Any]:
+        """签到，使用重试机制"""
+        extra_headers = {
+            "Referer": "https://w2.v2free.top/user",
+            "Origin": "https://w2.v2free.top",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        self._delay(random.uniform(1, 2))
+
+        resp, err = self.request_with_retry('POST', self.sign_url,
+                                             headers=extra_headers,
+                                             max_retries=3,
+                                             retry_delay=2.0)
+        if err or resp is None:
+            return {"success": False, "msg": f"请求失败: {err}"}
+
+        if resp.status_code != 200:
+            return {"success": False, "msg": f"HTTP {resp.status_code}"}
+
+        text = self._decode_response(resp)
+        logging.debug(f"签到响应前200字符: {text[:200]}")
+
+        try:
+            result = json.loads(text)
+            if result.get("ret") == 1:
+                return {"success": True, "data": result}
+            else:
+                return {"success": False, "msg": result.get("msg", "未知错误")}
+        except json.JSONDecodeError:
+            if self._is_cloudflare_challenge(text, resp.status_code):
+                return {"success": False, "msg": "触发 Cloudflare 人机验证，签到失败"}
+            return {"success": False, "msg": f"非 JSON 响应: {text[:100]}"}
+
+    def send_push(self, title, content):
+        token = os.environ.get("PUSHPLUS_TOKEN")
+        if not token:
+            return
+        try:
+            requests.get("https://www.pushplus.plus/send", params={
+                "token": token,
+                "title": title,
+                "content": content
+            }, timeout=5)
+        except:
+            pass
+
+    def check_in(self):
+        logging.info(f"{self.masked_username} 开始签到...")
+        if not self.login():
+            self.send_push(f"{self.masked_username} 签到失败", "登录失败")
+            return False
+
+        self.visit_user_page()
+        sign_result = self.sign()
+
+        if sign_result["success"]:
+            logging.info(f"{self.masked_username} ✅ 签到成功: {sign_result['data']}")
+            self.send_push(f"{self.masked_username} 签到成功", json.dumps(sign_result['data'], ensure_ascii=False))
+            return True
+        else:
+            logging.error(f"{self.masked_username} ❌ 签到失败: {sign_result['msg']}")
+            self.send_push(f"{self.masked_username} 签到失败", f"原因：{sign_result['msg']}")
+            return False
+
 
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--username', required=True)
+    parser.add_argument('--password', required=True)
+    args = parser.parse_args()
+
+    helper = CheckIn(args.username, args.password)
+    success = helper.check_in()
+    sys.exit(0 if success else 1)
