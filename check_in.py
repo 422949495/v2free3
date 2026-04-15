@@ -45,38 +45,6 @@ class V2FreeCheckIn:
         except Exception as e:
             logging.error(f"通知发送失败: {e}")
 
-    def _wait_for_login_form(self, page, timeout=30000):
-        """等待登录表单出现，支持多种可能的选择器"""
-        selectors = [
-            "input[name='email']",
-            "input[name='username']",
-            "input[type='email']",
-            "#email",
-            "#username",
-        ]
-        for sel in selectors:
-            try:
-                page.wait_for_selector(sel, timeout=5000)
-                logging.info(f"找到邮箱输入框: {sel}")
-                return sel
-            except PlaywrightTimeoutError:
-                continue
-        raise Exception("无法找到邮箱输入框，页面可能被 Cloudflare 拦截或结构变更")
-
-    def _wait_for_password_input(self, page, timeout=5000):
-        """等待密码输入框"""
-        selectors = [
-            "input[name='passwd']",
-            "input[name='password']",
-            "input[type='password']",
-            "#password",
-        ]
-        for sel in selectors:
-            if page.locator(sel).count() > 0:
-                logging.info(f"找到密码输入框: {sel}")
-                return sel
-        raise Exception("无法找到密码输入框")
-
     def run(self):
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -90,52 +58,42 @@ class V2FreeCheckIn:
             page = context.new_page()
 
             try:
-                # 访问登录页，等待网络空闲
+                # 1. 访问登录页面，并等待网络空闲
                 logging.info(f"正在访问登录页: {self.LOGIN_URL}")
                 page.goto(self.LOGIN_URL, wait_until="networkidle", timeout=60000)
                 
-                # 检查是否被 Cloudflare 拦截（常见提示）
-                cf_text = page.locator("body").inner_text()
-                if "Checking your browser" in cf_text or "DDoS" in cf_text:
-                    logging.error("页面被 Cloudflare 浏览器检查拦截，无法自动通过。")
-                    # 保存截图以便调试
-                    page.screenshot(path="cf_challenge.png")
-                    logging.info("已保存截图 cf_challenge.png")
-                    raise Exception("Cloudflare 拦截，无法继续")
-
-                # 等待登录表单出现
-                email_selector = self._wait_for_login_form(page)
-                pass_selector = self._wait_for_password_input(page)
-
-                # 填写账号密码
+                # 2. 等待登录表单加载完成
+                page.wait_for_selector("input[name='Email']", timeout=10000)
+                page.wait_for_selector("input[name='Password']", timeout=10000)
+                
+                # 3. 输入账号和密码
                 logging.info(f"正在登录 {self.masked_username} ...")
-                page.fill(email_selector, self.username)
-                page.fill(pass_selector, self.password)
+                page.fill("input[name='Email']", self.username)
+                page.fill("input[name='Password']", self.password)
+                
+                # 4. 点击登录按钮
+                page.click("button:has-text('登录')")
+                logging.info("已点击登录按钮，等待页面跳转...")
+                
+                # 5. 等待登录成功后的跳转
+                try:
+                    # 等待跳转到用户中心页面，增加超时时间到30秒
+                    page.wait_for_url(f"{self.USER_URL}*", timeout=30000)
+                    logging.info("登录成功，已跳转至用户中心！")
+                except PlaywrightTimeoutError:
+                    # 如果超时，检查当前URL是否是用户中心，可能已经跳转了但URL匹配失败
+                    current_url = page.url
+                    if self.USER_URL in current_url:
+                        logging.info(f"当前已在用户中心: {current_url}")
+                    else:
+                        # 如果不在用户中心，可能是登录失败，保存截图并退出
+                        page.screenshot(path="login_failed.png")
+                        raise Exception(f"登录后未能跳转到用户中心，当前URL: {current_url}")
 
-                # 点击登录按钮（同样尝试多种选择器）
-                submit_selectors = [
-                    "button[type='submit']",
-                    "button:has-text('登录')",
-                    "button:has-text('Login')",
-                    "input[type='submit']",
-                ]
-                clicked = False
-                for sel in submit_selectors:
-                    if page.locator(sel).count() > 0:
-                        page.locator(sel).first.click()
-                        clicked = True
-                        logging.info(f"点击登录按钮: {sel}")
-                        break
-                if not clicked:
-                    raise Exception("未找到登录按钮")
-
-                # 等待跳转到用户中心
-                page.wait_for_url(f"{self.USER_URL}*", timeout=20000)
-                logging.info("登录成功！")
-
-                # 签到流程
+                # 6. 确保在用户中心页面
                 page.goto(self.USER_URL, wait_until="networkidle")
-                # 查找签到按钮
+                
+                # 7. 签到
                 sign_selectors = [
                     "button:has-text('签到')",
                     "a:has-text('签到')",
@@ -152,7 +110,6 @@ class V2FreeCheckIn:
                         break
 
                 if not clicked_sign:
-                    # 备用：直接 POST 接口
                     logging.warning("未找到签到按钮，尝试直接调用签到 API")
                     response = page.request.post(
                         self.SIGN_URL,
@@ -160,8 +117,7 @@ class V2FreeCheckIn:
                     )
                     result_text = response.text()
                 else:
-                    page.wait_for_timeout(3000)  # 等待结果展示
-                    # 尝试获取结果消息
+                    page.wait_for_timeout(3000)
                     result_locators = [
                         ".alert", ".toast", ".message", "#checkin-result", ".swal2-content"
                     ]
@@ -183,7 +139,6 @@ class V2FreeCheckIn:
             except PlaywrightTimeoutError as e:
                 error_msg = f"操作超时: {e}"
                 logging.error(error_msg)
-                # 保存失败时截图
                 page.screenshot(path="timeout_error.png")
                 logging.info("已保存截图 timeout_error.png")
                 self._send_notification(title=f"{self.masked_username} 签到失败", content=error_msg)
