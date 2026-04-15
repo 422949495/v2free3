@@ -1,10 +1,10 @@
-name: V2Free 每日签到
+name: V2Free Cookie 签到
 
 on:
   schedule:
-    # 每天北京时间 00:30 执行，可根据需要调整
+    # 每天 UTC 时间 16:30，对应北京时间次日 00:30（可自行调整）
     - cron: '30 16 * * *'
-  workflow_dispatch:
+  workflow_dispatch:   # 允许手动触发
 
 jobs:
   checkin:
@@ -19,21 +19,10 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: |
-          pip install playwright requests
-          playwright install chromium
+        run: pip install requests
 
-      - name: 执行签到
+      - name: 执行 Cookie 签到
         env:
-          V2FREE_USERNAME: ${{ secrets.V2FREE_USERNAME }}
-          V2FREE_PASSWORD: ${{ secrets.V2FREE_PASSWORD }}
+          V2FREE_COOKIE: ${{ secrets.V2FREE_COOKIE }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python check_in.py
-
-      # 如果失败，上传截图用于调试
-      - name: 上传错误截图
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: error-screenshots
-          path: "*.png"
+        run: python check_in_cookie.py
