@@ -1,28 +1,33 @@
-name: V2Free 每日签到
+name: V2Free Cookie + Playwright 签到
 
 on:
   schedule:
-    - cron: '30 16 * * *'
+    - cron: '30 16 * * *'   # 北京时间 00:30
   workflow_dispatch:
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: 安装依赖
         run: |
           pip install playwright requests
           playwright install chromium
+
       - name: 执行签到
         env:
-          V2FREE_USERNAME: ${{ secrets.V2FREE_USERNAME }}
-          V2FREE_PASSWORD: ${{ secrets.V2FREE_PASSWORD }}
+          V2FREE_COOKIE: ${{ secrets.V2FREE_COOKIE }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python check_in.py
+        run: python check_in_cookie_playwright.py
+
       - name: 上传错误截图
         if: failure()
         uses: actions/upload-artifact@v4
