@@ -1,36 +1,55 @@
-name: V2Free Cookie + Playwright 签到
+name: V2FreeCheckIn
 
 on:
-  schedule:
-    - cron: '30 16 * * *'   # 北京时间 00:30
   workflow_dispatch:
+  schedule:
+    - cron: '5 13 * * *'   # 北京时间 21:05
+
+permissions:
+  contents: write
 
 jobs:
-  checkin:
+  check-in:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置 Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-
+          python-version: '3.10'
       - name: 安装依赖
-        run: |
-          pip install playwright requests
-          playwright install chromium
-
-      - name: 执行签到
+        run: pip install requests
+      - name: 签到主进程
         env:
-          V2FREE_COOKIE: ${{ secrets.V2FREE_COOKIE }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python check_in_cookie_playwright.py
-
-      - name: 上传错误截图
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: error-screenshots
-          path: "*.png"
+        run: |
+          user='${{ secrets.USER }}'
+          pwd='${{ secrets.PWD }}'
+          IFS=',' read -ra user_arr <<< "$user"
+          IFS=',' read -ra pwd_arr <<< "$pwd"
+          user_num=${#user_arr[@]}
+          pwd_num=${#pwd_arr[@]}
+          if [ $user_num -ne $pwd_num ]; then
+            echo "账号密码数量不匹配"
+            exit 1
+          fi
+          echo "共有 $user_num 个账号，开始签到..."
+          success_count=0
+          for ((i=0; i<user_num; i++)); do
+            u=$(echo "${user_arr[$i]}" | xargs)
+            p=$(echo "${pwd_arr[$i]}" | xargs)
+            echo "正在签到第 $((i+1)) 个账号: ${u%%@*}..."
+            if python check_in.py --username "$u" --password "$p"; then
+              ((success_count++))
+            fi
+          done
+          echo "签到完成，成功 $success_count / $user_num"
+          if [ $success_count -eq 0 ]; then
+            exit 1
+          fi
+      - name: 提交日志
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "actions@github.com"
+          git add run.log || true
+          git commit -m "📝 更新签到日志" || echo "无变更"
+          git push || echo "推送失败"
